@@ -1,0 +1,2837 @@
+[EXT] 
+Chauhan, Pawanpratapsingh<Pawanpratapsingh.Chauhan@aig.com>
+
+​
+Singh chauhan, Pawan pratap​
+create or replace PACKAGE BODY      PEL AS
+
+/**************************************************************************************
+
+   ---------  ----------  ---------------  --------------------------------------------
+
+   REVISIONS:
+
+   Ver        Date        Author           Description
+
+   ---------  ----------  ---------------  --------------------------------------------
+
+   1.0        10/31/2006                   1. Created this package.
+
+   2.0        05/24/2007  Architha         2. Removed AU part from code
+
+   3.0        09/26/2007  Architha         3. Changed code to run daily
+
+   4.0        09/03/2009  Architha         4. Added Error logging
+
+   5.0        03/01/2016  Mani             5. CIP Changes
+
+   6.0        06/19/2019  Architha/Saranya 6. Tuned the procs
+
+   7.0        06/28/2019  Architha/Saranya 7. Added expiration filter to inforce proc
+
+   8.0        03/20/2021  Manikandan       8. Added procedure PEL_UPDATE_DRIVER_INFO to update accidents_no and convictions_no
+
+   9.0        03/20/2021  Manikandan       9. Added procedure PEL_QTE_UPDATE_DRIVER_INFO to update accidents_no and convictions_no
+
+  10.0        08/05/2021  Architha        10. DC changes
+
+  11.0        06/10/2022  Architha        11. DC-NA changes
+
+  12.0        01/01/2026    Harikrishna     12. Instanda Admitted changes
+
+  12.0        01/01/2026    Harikrishna     12. Instanda Non-Admitted changes
+
+ 
+
+   ---------  ----------  ---------------  --------------------------------------------
+
+**************************************************************************************/
+
+   PROCEDURE pel_tcov_inf_cal_mn(in_date DATE) AS
+
+      v_month_sk                    NUMBER;
+
+      v_enddate                     NUMBER;
+
+      v_day_ct                      NUMBER;
+
+      v_enddateactual               DATE;
+
+      v_ym                          NUMBER;
+
+      del_cnt                       NUMBER;
+
+      ins_cnt                       NUMBER;
+
+      v_module_name                 terror_log.module_nm%TYPE := $$plsql_unit || '.PEL_TCOV_INF_CAL_MN';
+
+      v_error_log_sk                terror_log.error_log_sk%TYPE;
+
+      v_log_params                  terror_log.module_params_tx%TYPE := NULL;
+
+      v_rows_processed              terror_log.rows_processed%TYPE := 0;
+
+   BEGIN
+
+      v_enddateactual            := in_date;
+
+ 
+
+      IF v_enddateactual = TRUNC(SYSDATE) THEN
+
+         v_enddateactual            := TRUNC(SYSDATE) - 1;
+
+      END IF;
+
+ 
+
+      v_log_params               := '(End Date ==>' || v_enddateactual || ');';
+
+      v_rows_processed           := 0;
+
+      pk_error_log.pr_log_strt_event(v_module_name, v_log_params, v_error_log_sk);
+
+ 
+
+      -- Get date_sk, V_YM, day_ct for sysdate
+
+      SELECT date_sk
+
+            ,year_month_ct
+
+            ,day_ct
+
+      INTO   v_enddate
+
+            ,v_ym
+
+            ,v_day_ct
+
+      FROM   tdate
+
+      WHERE  actual_dt = v_enddateactual;
+
+ 
+
+      -- Get date_sk for the last date of the sysdate month. This will be used as month_sk in the inforce table.
+
+      SELECT date_sk
+
+      INTO   v_month_sk
+
+      FROM   tdate
+
+      WHERE  year_month_ct = v_ym
+
+      AND    month_end_in = 'Y';
+
+ 
+
+      -- If the sysdate is the first of the month then you dont have to delete any data
+
+      -- If if is not the first of the month then delete all of yesterday's data which is loaded using the same month_sk
+
+      IF v_day_ct <> 1 THEN
+
+         DELETE FROM tcoverages_inforce
+
+               WHERE (   policy_type_sk IN(10, 17)
+
+                      OR (source_system_sk = 14 AND policy_type_sk = 7 AND policy_sub_type_sk = 1)
+
+                      OR (source_system_sk = 17 AND policy_type_sk = 16 AND policy_sub_type_sk = 3))
+
+             
+
+         AND         month_sk = v_month_sk
+
+         AND         snapshot_type_in = 0;
+
+ 
+
+         COMMIT;
+
+      END IF;
+
+ 
+
+      -- Excess Liability (PEL-10,17)
+
+      -- While most fields are derived from TTRANSACTION, the coverage_sk is taken from TPEL_COVERAGE.PEL_COVERAGE_SK
+
+      INSERT INTO tcoverages_inforce
+
+                  (month_sk
+
+                  ,policy_sk
+
+                  ,item_sk
+
+                  ,customer_sk
+
+                  ,broker_sk
+
+                  ,policy_type_sk
+
+                  ,coverage_sk
+
+                  ,item_attr_sk
+
+                  ,intcov_sk
+
+                  ,source_system_sk
+
+                  ,snapshot_type_in
+
+                  ,policy_sub_type_sk)
+
+ 
+
+        with inf as
+
+        (
+
+            select *
+
+            from
+
+            (   select policy_sk,customer_sk,broker_sk,intcov_sk,policy_type_sk,source_system_sk,policy_sub_type_sk,
+
+                        effective_dt_sk,transaction_dt_sk,tran_type_sk,
+
+                        row_number() over(partition by policy_sk,intcov_sk order by transaction_sqn_sk desc)rn
+
+                 from ttransaction tr
+
+                 where (tr.policy_type_sk IN(10, 17)
+
+                         OR (    tr.source_system_sk = 14
+
+                             AND tr.policy_type_sk = 7
+
+                             AND tr.policy_sub_type_sk = 1)
+
+                         OR (tr.source_system_sk = 17 AND tr.policy_type_sk = 16 AND tr.policy_sub_type_sk = 3)
+
+                        )
+
+                        AND tr.effective_dt_sk <= v_enddate
+
+                        AND tr.transaction_dt_sk <= v_enddate
+
+                        and tr.expiration_dt_sk > v_enddate
+
+              )A
+
+           where rn=1
+
+           )      
+
+         SELECT v_month_sk AS month_sk
+
+               ,inf.policy_sk AS policy_sk
+
+               ,0 AS item_sk
+
+               ,inf.customer_sk AS customer_sk
+
+               ,inf.broker_sk AS broker_sk
+
+               ,inf.policy_type_sk AS policy_type_sk
+
+               ,cov.pel_coverage_sk AS coverage_sk
+
+               ,0 AS item_attribute_sk
+
+               ,inf.intcov_sk
+
+               ,inf.source_system_sk
+
+               ,0 AS snapshot_type_in
+
+               ,inf.policy_sub_type_sk
+
+         FROM   tpel_coverage cov
+
+               ,tpolicy pol
+
+               ,inf--ttransaction tr
+
+         WHERE  cov.endorsement_no =
+
+                   (SELECT MAX(endorsement_no)
+
+                    FROM   tpel_coverage cov1
+
+                    WHERE  cov.policy_no = cov1.policy_no
+
+                    AND    cov.inception_dt = cov1.inception_dt
+
+                    AND    cov1.effective_dt <= v_enddateactual
+
+                    AND    cov1.transaction_dt <= v_enddateactual)
+
+         AND    cov.policy_no = pol.policy_no
+
+         AND    cov.inception_dt = pol.inception_dt
+
+         AND    cov.expiration_dt > v_enddateactual
+
+         AND    pol.policy_sk = inf.policy_sk
+
+         /*AND    (   tr.policy_type_sk IN(10, 17)
+
+                 OR (    tr.source_system_sk = 14
+
+                     AND tr.policy_type_sk = 7
+
+                     AND tr.policy_sub_type_sk = 1)
+
+                 OR (tr.source_system_sk = 17 AND tr.policy_type_sk = 16 AND tr.policy_sub_type_sk = 3))*/
+
+                  --AND    inf.effective_dt_sk <= v_enddate  --newly added
+
+                 --   AND    inf.transaction_dt_sk <= v_enddate --newly added
+
+         AND    inf.tran_type_sk <> 4
+
+         --AND    tr.source_system_sk IN(1, 2, 5, 14)
+
+         AND    inf.source_system_sk IN(1, 2, 5, 14, 16, 17, 18, 19, 20, 21)   ----->>> Harikrishna Modified to Include 20,21 in the filter condition
+
+         /*AND    tr.transaction_sqn_sk =
+
+                   (SELECT MAX(transaction_sqn_sk)
+
+                    FROM   ttransaction tr1
+
+                    WHERE  tr1.policy_sk = tr.policy_sk
+
+                    AND    tr1.intcov_sk = tr.intcov_sk
+
+                    AND    (   tr1.policy_type_sk IN(10, 17)
+
+                            OR (    tr1.source_system_sk = 14
+
+                                AND tr1.policy_type_sk = 7
+
+                                AND tr1.policy_sub_type_sk = 1)
+
+                            OR (tr1.source_system_sk = 17 AND tr1.policy_type_sk = 16 AND tr1.policy_sub_type_sk = 3))
+
+                    AND    tr1.effective_dt_sk <= v_enddate
+
+                    AND    tr1.transaction_dt_sk <= v_enddate)*/;
+
+ 
+
+      v_rows_processed           := v_rows_processed + SQL%ROWCOUNT;
+
+      COMMIT;
+
+      pk_error_log.pr_log_end_event(v_error_log_sk, v_rows_processed);
+
+   EXCEPTION
+
+      WHEN OTHERS THEN
+
+         pk_error_log.pr_log_err_event(v_error_log_sk, DBMS_UTILITY.format_error_backtrace, SQLERRM);
+
+         RAISE;
+
+   END;   ------------------------------------END OF TCOVERAGES_INFORCE_PEL ------------------------------------------------
+
+ 
+
+   PROCEDURE pel_tcov_del_cal_mn(
+
+      in_date                             DATE) AS
+
+      v_enddate                     NUMBER;
+
+      v_enddateactual               DATE;
+
+      v_ym                          NUMBER;
+
+      v_month_sk                    NUMBER;
+
+      v_day_ct                      NUMBER;
+
+      v_prevmonth                   NUMBER;
+
+      v_module_name                 terror_log.module_nm%TYPE := $$plsql_unit || '.PEL_TCOV_DEL_CAL_MN';
+
+      v_error_log_sk                terror_log.error_log_sk%TYPE;
+
+      v_log_params                  terror_log.module_params_tx%TYPE := NULL;
+
+      v_rows_processed              terror_log.rows_processed%TYPE := 0;
+
+   BEGIN
+
+      v_enddateactual            := in_date;
+
+ 
+
+      IF v_enddateactual = TRUNC(SYSDATE) THEN
+
+         v_enddateactual            := TRUNC(SYSDATE) - 1;
+
+      END IF;
+
+ 
+
+      v_log_params               := '(End Date ==>' || v_enddateactual || ');';
+
+      v_rows_processed           := 0;
+
+      pk_error_log.pr_log_strt_event(v_module_name, v_log_params, v_error_log_sk);
+
+ 
+
+      -- Get date_sk, V_YM, day_ct for sysdate
+
+      SELECT date_sk
+
+            ,year_month_ct
+
+            ,day_ct
+
+      INTO   v_enddate
+
+            ,v_ym
+
+            ,v_day_ct
+
+      FROM   tdate
+
+      WHERE  actual_dt = v_enddateactual;
+
+ 
+
+      -- Get date_sk for the last date of the sysdate month. This will be used as month_sk in the inforce table.
+
+      SELECT date_sk
+
+      INTO   v_month_sk
+
+      FROM   tdate
+
+      WHERE  year_month_ct = v_ym
+
+      AND    month_end_in = 'Y';
+
+ 
+
+      SELECT MAX(date_sk)
+
+      INTO   v_prevmonth
+
+      FROM   tdate
+
+      WHERE  year_month_ct < v_ym
+
+      AND    month_end_in = 'Y';
+
+ 
+
+      -- If the sysdate is the first of the month then you dont have to delete any data
+
+      -- If if is not the first of the month then delete all of yesterday's data which is loaded using the same month_sk
+
+      IF v_day_ct <> 1 THEN
+
+         DELETE FROM tcoverages_deleted
+
+               WHERE  (   policy_type_sk IN(10, 17)
+
+                      OR ( /*   source_system_sk = 14
+
+                          AND */policy_type_sk = 7
+
+                          AND policy_sub_type_sk = 1)
+
+                      OR (/*source_system_sk = 17 AND */policy_type_sk = 16 AND policy_sub_type_sk = 3))
+
+         AND         month_sk = v_month_sk;
+
+      END IF;
+
+ 
+
+      DBMS_OUTPUT.put_line(v_ym);
+
+      DBMS_OUTPUT.put_line(SYSTIMESTAMP);
+
+ 
+
+      INSERT INTO tcoverages_deleted
+
+                  (month_sk
+
+                  ,policy_sk
+
+                  ,item_sk
+
+                  ,customer_sk
+
+                  ,broker_sk
+
+                  ,policy_type_sk
+
+                  ,coverage_sk
+
+                  ,item_attr_sk
+
+                  ,intcov_sk
+
+                  ,intcov2_sk
+
+                  ,prior_intcov_sk
+
+                  ,snapshot_type_in
+
+                  ,policy_sub_type_sk)
+
+         SELECT v_month_sk AS month_sk
+
+               ,a.policy_sk
+
+               ,0 AS item_sk
+
+               ,tr.customer_sk
+
+               ,tr.broker_sk
+
+               ,tr.policy_type_sk
+
+               ,tr.coverage_sk
+
+               ,0 asitem_attribute_sk
+
+               ,a.intcov_sk
+
+               ,tr.coverage_sk AS intcov2_sk
+
+               ,a.coverage_sk AS prior_intcov_sk
+
+               ,0 AS shapshot_type_in
+
+               ,a.policy_sub_type_sk
+
+         FROM   tcoverages_inforce a LEFT JOIN tcoverages_inforce b
+
+                ON  a.policy_sk = b.policy_sk
+
+                AND a.intcov_sk = b.intcov_sk
+
+                AND b.month_sk = v_month_sk
+
+                INNER JOIN ttransaction tr ON a.policy_sk = tr.policy_sk
+
+                AND                          a.intcov_sk = tr.intcov_sk
+
+                INNER JOIN tpolicy pol ON pol.policy_sk = tr.policy_sk
+
+         WHERE  a.month_sk = v_prevmonth
+
+         AND    a.policy_type_sk IN(10, 17)
+
+         AND    a.snapshot_type_in = 0
+
+         AND    b.intcov_sk IS NULL
+
+         AND    pol.expiration_dt > v_enddateactual
+
+         AND    (   tr.policy_type_sk IN(10, 17)
+
+                 OR (    tr.source_system_sk = 14
+
+                     AND tr.policy_type_sk = 7
+
+                     AND tr.policy_sub_type_sk = 1)
+
+                 OR (tr.source_system_sk = 17 AND tr.policy_type_sk = 16 AND tr.policy_sub_type_sk = 3))
+
+         AND    tr.transaction_sqn_sk =
+
+                   (SELECT --MAX(transaction_sqn_sk)
+
+                   case when tr.source_system_sk in (20,21) then MIN(transaction_sqn_sk) else MAX(transaction_sqn_sk) end  --->> Harikrishna added for handling negations of transaction_sqn_sk for instanda data
+
+                    FROM   ttransaction tr1
+
+                    WHERE  (   tr1.policy_type_sk IN(10, 17)
+
+                            OR (    tr1.source_system_sk = 14
+
+                                AND tr1.policy_type_sk = 7
+
+                                AND tr1.policy_sub_type_sk = 1)
+
+                            OR (tr1.source_system_sk = 17 AND tr1.policy_type_sk = 16 AND tr1.policy_sub_type_sk = 3))
+
+                    AND    tr1.policy_sk = tr.policy_sk
+
+                    AND    tr1.intcov_sk = tr.intcov_sk
+
+                    AND    GREATEST(tr1.transaction_dt_sk, tr1.effective_dt_sk) <= v_enddate);
+
+ 
+
+      v_rows_processed           := v_rows_processed + SQL%ROWCOUNT;
+
+      COMMIT;
+
+      pk_error_log.pr_log_end_event(v_error_log_sk, v_rows_processed);
+
+   EXCEPTION
+
+      WHEN OTHERS THEN
+
+         pk_error_log.pr_log_err_event(v_error_log_sk, DBMS_UTILITY.format_error_backtrace, SQLERRM);
+
+         RAISE;
+
+   END;
+
+ 
+
+--3. Load TCOVERAGES_REINSTATED table
+
+/************************************************************************************************************************
+
+This Script loads TCOVERAGE_REINSTATED TABLE by calendar month which will have one record
+
+per coverage for each insured item. Not applicable for Home owners Policies
+
+************************************************************************************************************************/
+
+   PROCEDURE pel_tcov_rein_cal_mn(
+
+      in_date                             DATE) AS
+
+      v_enddate                     NUMBER;
+
+      v_month_sk                    NUMBER;
+
+      v_day_ct                      NUMBER;
+
+      v_enddateactual               DATE;
+
+      v_begindate                   NUMBER;
+
+      v_begindateactual             DATE;
+
+      v_ym                          NUMBER;
+
+      v_prevmonth                   NUMBER;
+
+      v_module_name                 terror_log.module_nm%TYPE := $$plsql_unit || '.PEL_TCOV_REIN_CAL_MN';
+
+      v_error_log_sk                terror_log.error_log_sk%TYPE;
+
+      v_log_params                  terror_log.module_params_tx%TYPE := NULL;
+
+      v_rows_processed              terror_log.rows_processed%TYPE := 0;
+
+   BEGIN
+
+      v_enddateactual            := in_date;
+
+ 
+
+      IF v_enddateactual = TRUNC(SYSDATE) THEN
+
+         v_enddateactual            := TRUNC(SYSDATE) - 1;
+
+      END IF;
+
+ 
+
+      v_log_params               := '(End Date ==>' || v_enddateactual || ');';
+
+      v_rows_processed           := 0;
+
+      pk_error_log.pr_log_strt_event(v_module_name, v_log_params, v_error_log_sk);
+
+ 
+
+      -- Get date_sk, V_YM, day_ct for sysdate
+
+      SELECT date_sk
+
+            ,year_month_ct
+
+            ,day_ct
+
+      INTO   v_enddate
+
+            ,v_ym
+
+            ,v_day_ct
+
+      FROM   tdate
+
+      WHERE  actual_dt = v_enddateactual;
+
+ 
+
+      -- Get date_sk for the last date of the sysdate month. This will be used as month_sk in the inforce table.
+
+      SELECT date_sk
+
+      INTO   v_month_sk
+
+      FROM   tdate
+
+      WHERE  year_month_ct = v_ym
+
+      AND    month_end_in = 'Y';
+
+ 
+
+      SELECT MAX(date_sk)
+
+     INTO   v_prevmonth
+
+      FROM   tdate
+
+      WHERE  year_month_ct < v_ym
+
+      AND    month_end_in = 'Y';
+
+ 
+
+      SELECT date_sk
+
+            ,actual_dt
+
+     INTO   v_begindate
+
+            ,v_begindateactual
+
+      FROM   tdate
+
+      WHERE  year_month_ct = v_ym
+
+      AND    day_ct = 1;
+
+ 
+
+      --- If the sysdate is the first of the month then you dont have to delete any data
+
+      -- If if is not the first of the month then delete all of yesterday's data which is loaded using the same month_sk
+
+      IF v_day_ct <> 1 THEN
+
+         DELETE FROM tcoverages_reinstated
+
+               WHERE (   policy_type_sk IN(10, 17)
+
+                      OR ( /*source_system_sk = 14 and */     policy_type_sk = 7
+
+                                                          AND policy_sub_type_sk = 1)
+
+                      OR (/*source_system_sk = 17 AND */policy_type_sk = 16 AND policy_sub_type_sk = 3))
+
+         AND         month_sk = v_month_sk
+
+         AND         snapshot_type_in = 0;
+
+      END IF;
+
+ 
+
+      DBMS_OUTPUT.put_line(v_ym);
+
+      DBMS_OUTPUT.put_line(SYSTIMESTAMP);
+
+INSERT INTO tcoverages_reinstated
+
+                  (month_sk
+
+                  ,policy_sk
+
+                  ,item_sk
+
+                  ,customer_sk
+
+                  ,broker_sk
+
+                  ,policy_type_sk
+
+                  ,coverage_sk
+
+                  ,item_attr_sk
+
+                  ,intcov_sk
+
+                  ,intcov2_sk
+
+                  ,prior_intcov_sk
+
+                  ,snapshot_type_in
+
+                  ,policy_sub_type_sk)
+
+ 
+
+               WITH min_cov as (select cov1.policy_no,cov1.inception_dt,cov1.effective_dt,cov1.transaction_dt from tpel_coverage cov1 where cov1.pel_coverage_sk in(
+
+                 SELECT ----MIN(d.pel_coverage_sk) as pel_coverage_sk
+
+                 CASE WHEN cov1.source_system_sk in (20,21) then MAX(d.pel_coverage_sk) else MIN(d.pel_coverage_sk) END AS pel_coverage_sk  --- Harikrishna added for handling negations of pel_coverage_sk for instanda data
+
+                                            FROM   tpel_coverage d
+
+                                           where d.policy_no = cov1.policy_no
+
+                                            AND  d.inception_dt = cov1.inception_dt )),
+
+ 
+
+                max_tran as (select * from(select policy_sk,customer_sk,coverage_sk,broker_sk,intcov_sk,policy_type_sk,source_system_sk,policy_sub_type_sk,effective_dt_sk,transaction_dt_sk,tran_type_sk,
+
+                row_number() over(partition by policy_sk,intcov_sk order by transaction_sqn_sk desc)rn
+
+                  from ttransaction tr where (tr.policy_type_sk IN(10, 17)
+
+                 OR (    tr.source_system_sk = 14
+
+                     AND tr.policy_type_sk = 7
+
+                     AND tr.policy_sub_type_sk = 1)
+
+                 OR (tr.source_system_sk = 17 AND tr.policy_type_sk = 16 AND tr.policy_sub_type_sk = 3)) and GREATEST(tr.transaction_dt_sk, tr.effective_dt_sk) < v_begindate )A
+
+                  where rn=1 )
+
+ 
+
+         SELECT v_month_sk AS month_sk
+
+               ,a.policy_sk
+
+               ,0 AS item_sk
+
+               ,tr.customer_sk
+
+               ,tr.broker_sk
+
+               ,tr.policy_type_sk
+
+               ,a.coverage_sk
+
+               ,0 as item_attribute_sk
+
+               ,a.intcov_sk
+
+               ,a.coverage_sk AS intcov2_sk
+
+               ,tr.coverage_sk AS prior_intcov_sk
+
+               ,0 AS shapshot_type_in
+
+               ,a.policy_sub_type_sk
+
+         FROM   tcoverages_inforce a LEFT JOIN tcoverages_inforce b
+
+                ON  a.policy_sk = b.policy_sk
+
+                AND a.intcov_sk = b.intcov_sk
+
+                AND b.month_sk = v_prevmonth
+
+                INNER JOIN max_tran tr ON a.policy_sk = tr.policy_sk
+
+                AND                          a.intcov_sk = tr.intcov_sk
+
+                INNER JOIN tpolicy pol ON pol.policy_sk = tr.policy_sk
+
+                INNER JOIN tpel_coverage cov ON cov.pel_coverage_sk = tr.coverage_sk
+
+                INNER JOIN min_cov c1 ON  pol.policy_no = c1.policy_no
+
+                AND pol.inception_dt = c1.inception_dt
+
+         WHERE  a.month_sk = v_month_sk
+
+         AND    (   a.policy_type_sk IN(10, 17)
+
+                 OR (    a.source_system_sk = 14
+
+                     AND a.policy_type_sk = 7
+
+                     AND a.policy_sub_type_sk = 1)
+
+                 OR (a.source_system_sk = 17 AND a.policy_type_sk = 16 AND a.policy_sub_type_sk = 3))
+
+         AND    a.snapshot_type_in = 0
+
+         AND    b.intcov_sk IS NULL
+
+         AND    TO_CHAR(GREATEST(cov.effective_dt, cov.transaction_dt), 'mm') <> TO_CHAR(GREATEST(c1.effective_dt, c1.transaction_dt), 'mm')
+
+         ;
+
+ 
+
+      /*INSERT INTO tcoverages_reinstated
+
+                  (month_sk
+
+                  ,policy_sk
+
+                  ,item_sk
+
+                  ,customer_sk
+
+                  ,broker_sk
+
+                  ,policy_type_sk
+
+                  ,coverage_sk
+
+                  ,item_attr_sk
+
+                  ,intcov_sk
+
+                  ,intcov2_sk
+
+                  ,prior_intcov_sk
+
+                  ,snapshot_type_in
+
+                  ,policy_sub_type_sk)
+
+         SELECT v_month_sk AS month_sk
+
+               ,a.policy_sk
+
+               ,0 AS item_sk
+
+               ,tr.customer_sk
+
+               ,tr.broker_sk
+
+               ,tr.policy_type_sk
+
+               ,a.coverage_sk
+
+               ,0 asitem_attribute_sk
+
+               ,a.intcov_sk
+
+               ,a.coverage_sk AS intcov2_sk
+
+               ,tr.coverage_sk AS prior_intcov_sk
+
+               ,0 AS shapshot_type_in
+
+               ,a.policy_sub_type_sk
+
+         FROM   tcoverages_inforce a LEFT JOIN tcoverages_inforce b
+
+                ON  a.policy_sk = b.policy_sk
+
+                AND a.intcov_sk = b.intcov_sk
+
+                AND b.month_sk = v_prevmonth
+
+                INNER JOIN ttransaction tr ON a.policy_sk = tr.policy_sk
+
+                AND                          a.intcov_sk = tr.intcov_sk
+
+                INNER JOIN tpolicy pol ON pol.policy_sk = tr.policy_sk
+
+                INNER JOIN tpel_coverage cov ON cov.pel_coverage_sk = tr.coverage_sk
+
+                INNER JOIN tpel_coverage cov1
+
+                ON  pol.policy_no = cov1.policy_no
+
+                AND pol.inception_dt = cov1.inception_dt
+
+                AND cov1.pel_coverage_sk = (SELECT MIN(pel_coverage_sk)
+
+                                            FROM   tpel_coverage d
+
+                                            WHERE  d.policy_no = cov1.policy_no
+
+                                            AND    d.inception_dt = cov1.inception_dt)
+
+         WHERE  a.month_sk = v_month_sk
+
+         AND    (   a.policy_type_sk IN(10, 17)
+
+                 OR (    a.source_system_sk = 14
+
+                     AND a.policy_type_sk = 7
+
+                     AND a.policy_sub_type_sk = 1)
+
+                 OR (a.source_system_sk = 17 AND a.policy_type_sk = 16 AND a.policy_sub_type_sk = 3))
+
+         AND    a.snapshot_type_in = 0
+
+         AND    b.intcov_sk IS NULL
+
+         AND    TO_CHAR(GREATEST(cov.effective_dt, cov.transaction_dt), 'mm') <> TO_CHAR(GREATEST(cov1.effective_dt, cov1.transaction_dt), 'mm')
+
+         AND    (   tr.policy_type_sk IN(10, 17)
+
+                 OR (    tr.source_system_sk = 14
+
+                     AND tr.policy_type_sk = 7
+
+                     AND tr.policy_sub_type_sk = 1)
+
+                 OR (tr.source_system_sk = 17 AND tr.policy_type_sk = 16 AND tr.policy_sub_type_sk = 3))
+
+         AND    tr.transaction_sqn_sk =
+
+                   (SELECT MAX(transaction_sqn_sk)
+
+                    FROM   ttransaction tr1
+
+                    WHERE  tr1.policy_type_sk IN(10, 17)
+
+                    AND    tr1.policy_sk = tr.policy_sk
+
+                    AND    tr1.intcov_sk = tr.intcov_sk
+
+                    AND    GREATEST(tr1.transaction_dt_sk, tr1.effective_dt_sk) < v_begindate);*/
+
+ 
+
+      v_rows_processed           := v_rows_processed + SQL%ROWCOUNT;
+
+      COMMIT;
+
+      pk_error_log.pr_log_end_event(v_error_log_sk, v_rows_processed);
+
+   EXCEPTION
+
+      WHEN OTHERS THEN
+
+         pk_error_log.pr_log_err_event(v_error_log_sk, DBMS_UTILITY.format_error_backtrace, SQLERRM);
+
+         RAISE;
+
+   END;
+
+ 
+
+--4. Load TCOVERAGES_SUMMARY table
+
+/*********************************************************************************************************
+
+This Script loads TCOVERAGES_SUMMARY table with PIM data by calendar month.
+
+Not applicable for Home owners Policies
+
+**********************************************************************************************************/
+
+   PROCEDURE pel_tcov_summ_cal_mn(
+
+      in_date                             DATE) AS
+
+      v_monthbegindate              NUMBER;
+
+      v_month_sk                    NUMBER;
+
+      v_day_ct                      NUMBER;
+
+      v_enddate                     NUMBER;
+
+      v_prevmonth                   NUMBER;
+
+      v_ym                          NUMBER;
+
+      v_yearbegindate               NUMBER;
+
+      v_monthbegindateactual        DATE;
+
+      v_prevmonthdateactual         DATE;
+
+      v_enddateactual               DATE;
+
+      v_module_name                 terror_log.module_nm%TYPE := $$plsql_unit || '.PEL_TCOV_SUMM_CAL_MN';
+
+      v_error_log_sk                terror_log.error_log_sk%TYPE;
+
+      v_log_params                  terror_log.module_params_tx%TYPE := NULL;
+
+      v_rows_processed              terror_log.rows_processed%TYPE := 0;
+
+   BEGIN
+
+      v_enddateactual            := in_date;
+
+ 
+
+      IF v_enddateactual = TRUNC(SYSDATE) THEN
+
+         v_enddateactual            := TRUNC(SYSDATE) - 1;
+
+      END IF;
+
+ 
+
+      v_log_params               := '(End Date ==>' || v_enddateactual || ');';
+
+      v_rows_processed           := 0;
+
+      pk_error_log.pr_log_strt_event(v_module_name, v_log_params, v_error_log_sk);
+
+ 
+
+      -- Get date_sk, V_YM, day_ct for sysdate
+
+      SELECT date_sk
+
+            ,year_month_ct
+
+            ,day_ct
+
+      INTO   v_enddate
+
+            ,v_ym
+
+            ,v_day_ct
+
+      FROM   tdate
+
+      WHERE  actual_dt = v_enddateactual;
+
+ 
+
+      -- Get date_sk for the last date of the sysdate month. This will be used as month_sk in the inforce table.
+
+      SELECT date_sk
+
+      INTO   v_month_sk
+
+      FROM   tdate
+
+      WHERE  year_month_ct = v_ym
+
+      AND    month_end_in = 'Y';
+
+ 
+
+      SELECT date_sk
+
+            ,actual_dt
+
+      INTO   v_monthbegindate
+
+            ,v_monthbegindateactual
+
+      FROM   tdate
+
+      WHERE  year_month_ct = v_ym
+
+      AND    day_ct = 1;
+
+ 
+
+      SELECT date_sk
+
+      INTO   v_yearbegindate
+
+      FROM   tdate
+
+      WHERE  year_ct = SUBSTR(v_ym, 1, 4)
+
+      AND    month_ct = 1
+
+      AND    day_ct = 1;
+
+ 
+
+      SELECT MAX(date_sk)
+
+            ,MAX(actual_dt)
+
+      INTO   v_prevmonth
+
+            ,v_prevmonthdateactual
+
+      FROM   tdate
+
+      WHERE  year_month_ct < v_ym
+
+      AND    month_end_in = 'Y';
+
+ 
+
+      -- If the sysdate is the first of the month then you dont have to delete any data
+
+      -- If if is not the first of the month then delete all of yesterday's data which is loaded using the same month_sk
+
+      IF v_day_ct <> 1 THEN
+
+         DELETE FROM tcoverages_summary
+
+               WHERE (   policy_type_sk IN(10, 17)
+
+                      OR (    source_system_sk = 14
+
+                          AND policy_type_sk = 7
+
+                          AND policy_sub_type_sk = 1)
+
+                      OR (source_system_sk = 17 AND policy_type_sk = 16 AND policy_sub_type_sk = 3))
+
+         AND         month_sk = v_month_sk
+
+         AND         snapshot_type_in = 0;
+
+      END IF;
+
+ 
+
+      /*
+
+      DBMS_OUTPUT.put_line('v_PrevMonth' || '-' || v_PrevMonth);
+
+      DBMS_OUTPUT.put_line('v_MonthBeginDate' || '-' || v_MonthBeginDate);
+
+      DBMS_OUTPUT.put_line('v_YearBeginDate' || '-' || v_YearBeginDate);
+
+      DBMS_OUTPUT.put_line('v_month_sk' || '-' || v_month_sk);
+
+      DBMS_OUTPUT.put_line('v_EndDate' || '-' || v_EndDate);
+
+      DBMS_OUTPUT.put_line('v_day_ct' || '-' || v_day_ct);
+
+      DBMS_OUTPUT.put_line('v_ym' || '-' || v_ym);
+
+      */
+
+      DBMS_OUTPUT.put_line(v_ym || '-' || SYSTIMESTAMP);
+
+ 
+
+      INSERT INTO tcoverages_summary
+
+                  (month_sk
+
+                  ,policy_sk
+
+                  ,item_sk
+
+                  ,intcov_sk
+
+                  ,item_attribute_sk
+
+                  ,coverage_sk
+
+                  ,customer_sk
+
+                  ,policy_type_sk
+
+                  ,policy_status_cd
+
+                  ,broker_sk
+
+                  ,source_system_sk
+
+                  ,snapshot_type_in
+
+                  ,mtd_written_prm_am
+
+                  ,mtd_net_premium_am
+
+                  ,ytd_written_prm_am
+
+                  ,ytd_net_premium_am
+
+                  ,itd_written_prm_am
+
+                  ,written_xpsr_am
+
+                  ,earned_xpsr_am
+
+                  ,earned_prm_am
+
+                  ,inforce_prm_am
+
+                  ,inforce_ct
+
+                  ,annual_premium_am
+
+                  ,tfs_am
+
+                  ,mtd_written_prm_original_am
+
+                  ,ytd_written_prm_original_am
+
+                  ,itd_written_prm_original_am
+
+                  ,mtd_net_premium_original_am
+
+                  ,ytd_net_premium_original_am
+
+                  ,earned_prm_original_am
+
+                  ,inforce_prm_original_am
+
+                  ,annual_premium_original_am
+
+                  ,policy_sub_type_sk)
+
+         WITH inf AS
+
+              (SELECT  a.policy_sk
+
+                       ,a.intcov_sk
+
+                       ,a.coverage_sk
+
+                       ,1 AS inforce_ct
+
+                       ,SUM(tr.premium_am) inforce_prm_am
+
+                       ,SUM(tr.premium_original_am) inforce_prm_original_am
+
+               FROM     tcoverages_inforce a
+
+                       ,ttransaction tr
+
+               WHERE    a.snapshot_type_in = 0
+
+               AND      (   a.policy_type_sk IN(10, 17)
+
+                         OR (    a.source_system_sk = 14
+
+                             AND a.policy_type_sk = 7
+
+                             AND a.policy_sub_type_sk = 1)
+
+                         OR (a.source_system_sk = 17 AND a.policy_type_sk = 16 AND a.policy_sub_type_sk = 3))
+
+               AND      tr.premium_am <> 0
+
+               AND      a.month_sk = v_month_sk
+
+               AND      a.policy_sk = tr.policy_sk
+
+               AND      a.intcov_sk = tr.intcov_sk
+
+               AND      tr.transaction_dt_sk <= v_enddate
+
+               AND      tr.effective_dt_sk <= v_enddate
+
+               GROUP BY a.policy_sk
+
+                       ,a.intcov_sk
+
+                       ,a.coverage_sk)
+
+             ,we_ie AS
+
+              (select policy_sk,intcov_sk,inforce_exposure,written_exposure from (SELECT a.policy_sk
+
+                     ,a.intcov_sk
+
+                     ,ROUND(  CASE
+
+                                 WHEN transaction_dt_sk BETWEEN v_monthbegindate AND v_enddate
+
+                              AND    tr.effective_dt_sk < v_monthbegindate THEN   (v_monthbegindate - tr.effective_dt_sk)
+
+                                                                                / (pol.expiration_dt - pol.inception_dt)
+
+                                 ELSE 0
+
+                              END
+
+                            + CASE
+
+                                 WHEN b.intcov_sk IS NULL
+
+                              AND    transaction_dt_sk NOT BETWEEN v_monthbegindate AND v_enddate
+
+                              AND    tr.effective_dt_sk < v_monthbegindate THEN   (v_monthbegindate - tr.effective_dt_sk)
+
+                                                                                / (pol.expiration_dt - pol.inception_dt)
+
+                                 ELSE 0
+
+                              END
+
+                            +   (  (CASE
+
+                                       WHEN tr.expiration_dt_sk > v_enddate THEN v_enddate + 1
+
+                                       ELSE tr.expiration_dt_sk
+
+                                    END)
+
+                                 - (CASE
+
+                                       WHEN effective_dt_sk <= v_monthbegindate THEN v_monthbegindate
+
+                                       ELSE effective_dt_sk
+
+                                    END))
+
+                              / (tr.expiration_dt_sk - (SELECT date_sk
+
+                                                        FROM   tdate
+
+                                                        WHERE  actual_dt = pol.inception_dt))
+
+                           ,3) AS inforce_exposure
+
+                     ,ROUND(CASE
+
+                               WHEN b.intcov_sk IS NULL THEN (tr.expiration_dt_sk - tr.effective_dt_sk) /(pol.expiration_dt - pol.inception_dt)
+
+                               ELSE 0
+
+                            END, 3) AS written_exposure,
+
+                            --row_number() over (partition by tr.policy_sk, tr.intcov_sk order by tr.transaction_sqn_sk) rn
+
+                            case when pol.source_system_sk in (20,21) then                                                                                                                        
+
+                           row_number() over (partition by tr.policy_sk, tr.intcov_sk order by tr.transaction_sqn_sk desc) else
+
+                           row_number() over (partition by tr.policy_sk, tr.intcov_sk order by tr.transaction_sqn_sk) end as rn   --- Harikrishna added for handling negations of transaction_sqn_sk for instanda data
+
+               FROM   tcoverages_inforce a
+
+                     ,ttransaction tr
+
+                     ,tpolicy pol
+
+                     ,   --tdate incep,
+
+                      (SELECT policy_sk
+
+                             ,intcov_sk
+
+                       FROM   tcoverages_inforce
+
+                       WHERE  month_sk = v_prevmonth
+
+                       AND    (   policy_type_sk IN(10, 17)
+
+                               OR (    source_system_sk = 14
+
+                                   AND policy_type_sk = 7
+
+                                   AND policy_sub_type_sk = 1)
+
+                               OR (source_system_sk = 17 AND policy_type_sk = 16 AND policy_sub_type_sk = 3))
+
+                       AND    snapshot_type_in = 0
+
+                       UNION
+
+                       SELECT policy_sk
+
+                             ,intcov_sk
+
+                       FROM   tcoverages_reinstated
+
+                       WHERE  month_sk = v_month_sk
+
+                       AND    (   policy_type_sk IN(10, 17)
+
+                               OR ( /*source_system_sk = 14 and */     policy_type_sk = 7
+
+                                                                   AND policy_sub_type_sk = 1)
+
+                               OR (/*source_system_sk = 17 AND */policy_type_sk = 16 AND policy_sub_type_sk = 3) )
+
+                       AND    snapshot_type_in = 0) b
+
+               WHERE  a.snapshot_type_in = 0
+
+               AND    (   a.policy_type_sk IN(10, 17)
+
+                       OR (    a.source_system_sk = 14
+
+                           AND a.policy_type_sk = 7
+
+                           AND a.policy_sub_type_sk = 1)
+
+                       OR (a.source_system_sk = 17  AND a.policy_type_sk = 16 AND a.policy_sub_type_sk = 3))
+
+               --and     incep.actual_dt = POL.INCEPTION_DT
+
+               AND    a.month_sk = v_month_sk
+
+               AND    a.policy_sk = tr.policy_sk
+
+               AND    a.intcov_sk = tr.intcov_sk
+
+               AND    tr.policy_type_sk IN(10, 17)
+
+               AND    pol.policy_sk = tr.policy_sk
+
+               AND    a.policy_sk = b.policy_sk(+)
+
+               AND    a.intcov_sk = b.intcov_sk(+)
+
+             /*  AND    tr.transaction_sqn_sk =
+
+                                            (SELECT MIN(transaction_sqn_sk)
+
+                                             FROM   ttransaction tr1
+
+                                             WHERE  tr1.policy_sk = tr.policy_sk
+
+                                             AND    tr1.intcov_sk = tr.intcov_sk
+
+                                             AND    tr1.policy_type_sk IN(10, 17))*/
+
+                                            ---- AND tr.policy_sk not in ('-600168923', '-600166655', '-600166471')
+
+                                              )where rn=1)
+
+             ,ee_exp AS
+
+              (SELECT inf.policy_sk
+
+                     ,inf.intcov_sk
+
+                     ,ROUND((pol.expiration_dt - v_monthbegindateactual) /(pol.expiration_dt - pol.inception_dt), 3) AS earned_exposure
+
+               FROM   tcoverages_inforce inf
+
+                     ,tpolicy pol
+
+               WHERE  inf.month_sk = v_prevmonth
+
+               AND    (   inf.policy_type_sk IN(10, 17)
+
+                       OR (    inf.source_system_sk = 14
+
+                           AND inf.policy_type_sk = 7
+
+                           AND inf.policy_sub_type_sk = 1)
+
+                       OR (inf.source_system_sk = 17 AND inf.policy_type_sk = 16 AND inf.policy_sub_type_sk = 3))
+
+               AND    inf.snapshot_type_in = 0
+
+               AND    pol.policy_sk = inf.policy_sk
+
+               AND    pol.expiration_dt BETWEEN v_monthbegindateactual AND v_enddateactual)
+
+             ,del_we_ee AS
+
+              (SELECT a.policy_sk
+
+                     ,a.intcov_sk
+
+                     ,ROUND((c.effective_dt - pol.expiration_dt) /(pol.expiration_dt - pol.inception_dt), 3) AS written_exposure
+
+                     ,   --CANCELLED WRITTEN EXPOSURE
+
+                      ROUND(CASE
+
+                               WHEN c.effective_dt <= v_prevmonthdateactual THEN   (c.effective_dt - v_prevmonthdateactual - 1)
+
+                                                                                 / (pol.expiration_dt - pol.inception_dt)
+
+                               ELSE (c.effective_dt - v_monthbegindateactual + 1) /(pol.expiration_dt - pol.inception_dt)
+
+                            END
+
+                           ,3) AS earned_exposure
+
+               FROM   tcoverages_deleted a
+
+                     ,tpel_coverage c
+
+                     ,tpolicy pol
+
+               WHERE  a.snapshot_type_in = 0
+
+               AND    (   a.policy_type_sk IN(10, 17)
+
+                       OR ( /*a.source_system_sk = 14 and */     a.policy_type_sk = 7
+
+                                                             AND a.policy_sub_type_sk = 1)
+
+                       OR (/*a.source_system_sk = 17 AND */a.policy_type_sk = 16 AND a.policy_sub_type_sk = 3))
+
+               AND    a.month_sk = v_month_sk
+
+               AND    a.coverage_sk = c.pel_coverage_sk
+
+               AND    pol.policy_sk = a.policy_sk)
+
+             ,rein_we_ee AS
+
+              (SELECT a.policy_sk
+
+                     ,a.intcov_sk
+
+                     ,ROUND(-1 *((c.effective_dt - pol.expiration_dt) /(pol.expiration_dt - pol.inception_dt)), 3) AS written_exposure
+
+                     ,   --CANCELLED WRITTEN EXPOSURE
+
+                      ROUND(  (  -1
+
+                               * CASE
+
+                                    WHEN TO_CHAR(c.effective_dt, 'yyyymm') = (SELECT year_month_ct
+
+                                                                              FROM   tdate
+
+                                                                              WHERE  date_sk = b.month_sk) THEN   (  1
+
+                                                                                                                   + c.effective_dt
+
+                                                                                                                   - (SELECT actual_dt
+
+                                                                                                                      FROM   tdate
+
+                                                                                                                      WHERE  day_ct = 1
+
+                                                                                                                      AND    year_month_ct =
+
+                                                                                                                                (SELECT year_month_ct
+
+                                                                                                                                 FROM   tdate
+
+                                                                                                                                 WHERE  date_sk =
+
+                                                                                                                                           b.month_sk)))
+
+                                                                                                                / (  pol.expiration_dt
+
+                                                                                                                   - pol.inception_dt)
+
+                                    ELSE   (c.effective_dt - (SELECT actual_dt
+
+                                                              FROM   tdate
+
+                                                              WHERE  month_end_in = 'Y'
+
+                                                              AND    year_month_ct =((SELECT year_month_ct
+
+                                                                                      FROM   tdate
+
+                                                                                      WHERE  date_sk = b.month_sk) - 1)) - 1)
+
+                                         / (pol.expiration_dt - pol.inception_dt)
+
+                                 END)
+
+                            + (  (v_prevmonthdateactual - (SELECT actual_dt
+
+                                                           FROM   tdate
+
+                                                           WHERE  day_ct = 1
+
+                                                           AND    year_month_ct = (SELECT year_month_ct
+
+                                                                                   FROM   tdate
+
+                                                                                   WHERE  date_sk = b.month_sk)) + 1)
+
+                               / (pol.expiration_dt - pol.inception_dt))
+
+                           ,3) AS earned_exposure
+
+               FROM   tcoverages_reinstated a
+
+                     ,tcoverages_deleted b
+
+                     ,tpel_coverage c
+
+                     ,tpolicy pol
+
+               WHERE  a.snapshot_type_in = 0
+
+               AND    (   a.policy_type_sk IN(10, 17)
+
+                       OR ( /*a.source_system_sk = 14 and */     a.policy_type_sk = 7
+
+                                                             AND a.policy_sub_type_sk = 1)
+
+                       OR (/*a.source_system_sk = 17 AND */a.policy_type_sk = 16 AND a.policy_sub_type_sk = 3))
+
+               AND    b.snapshot_type_in = 0
+
+               AND    (   b.policy_type_sk IN(10, 17)
+
+                       OR ( /*b.source_system_sk = 14 and */     b.policy_type_sk = 7
+
+                                                             AND b.policy_sub_type_sk = 1)
+
+                       OR (/*b.source_system_sk = 17 AND */b.policy_type_sk = 16 AND b.policy_sub_type_sk = 3))
+
+               AND    a.month_sk = v_month_sk
+
+               AND    b.coverage_sk = c.pel_coverage_sk
+
+               AND    pol.policy_sk = a.policy_sk
+
+               AND    a.policy_sk = b.policy_sk
+
+               AND    a.intcov_sk = b.intcov_sk
+
+               AND    b.month_sk =
+
+                         (SELECT MAX(month_sk)
+
+                          FROM   tcoverages_deleted b1
+
+                          WHERE  b1.snapshot_type_in = 0
+
+                          AND    (   b1.policy_type_sk IN(10, 17)
+
+                                  OR ( /*b1.source_system_sk = 14 and */     b1.policy_type_sk = 7
+
+                                                                         AND b1.policy_sub_type_sk = 1)
+
+                                  OR (/*b1.source_system_sk = 17 AND */b1.policy_type_sk = 16 AND b1.policy_sub_type_sk = 3))
+
+                          AND    b1.policy_sk = b.policy_sk
+
+                          AND    b1.intcov_sk = b.intcov_sk
+
+                          AND    b1.month_sk <= a.month_sk))
+
+             ,prm1 AS
+
+              (SELECT  tt.policy_sk
+
+                       ,tt.intcov_sk
+
+                       ,SUM(CASE
+
+                               WHEN GREATEST(tt.effective_dt_sk, tt.transaction_dt_sk) BETWEEN v_monthbegindate AND v_enddate THEN tt.premium_am
+
+                               ELSE 0
+
+                            END) AS mtd_written_prm_am
+
+                       ,SUM(CASE
+
+                               WHEN GREATEST(tt.effective_dt_sk, tt.transaction_dt_sk) BETWEEN v_monthbegindate AND v_enddate THEN tt.premium_original_am
+
+                               ELSE 0
+
+                            END) AS mtd_written_prm_original_am
+
+                       ,SUM(CASE
+
+                               WHEN GREATEST(tt.effective_dt_sk, tt.transaction_dt_sk) BETWEEN v_monthbegindate AND v_enddate THEN tt.commission_am
+
+                               ELSE 0
+
+                            END) AS mtd_commission_am
+
+                       ,SUM(CASE
+
+                               WHEN GREATEST(tt.effective_dt_sk, tt.transaction_dt_sk) BETWEEN v_monthbegindate AND v_enddate THEN tt.commission_original_am
+
+                               ELSE 0
+
+                            END) AS mtd_commission_original_am
+
+                       ,SUM(CASE
+
+                               WHEN GREATEST(tt.effective_dt_sk, tt.transaction_dt_sk) BETWEEN v_monthbegindate AND v_enddate THEN   tt.premium_am
+
+                                                                                                                                   - NVL
+
+                                                                                                                                        (tt.tax_fee_srchrg_am
+
+                                                                                                                                        ,0)
+
+                               ELSE 0
+
+                            END) AS mtd_net_premium_am
+
+                       ,SUM(CASE
+
+                               WHEN GREATEST(tt.effective_dt_sk, tt.transaction_dt_sk) BETWEEN v_monthbegindate AND v_enddate THEN   tt.premium_original_am
+
+                                                                                                                                   - NVL
+
+                                                                                                                                        (tt.tax_fee_srchrg_original_am
+
+                                                                                                                                        ,0)
+
+                               ELSE 0
+
+                            END) AS mtd_net_premium_original_am
+
+                       ,SUM(CASE
+
+                               WHEN GREATEST(tt.effective_dt_sk, tt.transaction_dt_sk) BETWEEN v_monthbegindate AND v_enddate THEN NVL
+
+                                                                                                                                     (tax_fee_srchrg_am
+
+                                                                                                                                     ,0)
+
+                               ELSE 0
+
+                            END) AS tfs_am
+
+                       ,SUM(CASE
+
+                               WHEN GREATEST(tt.effective_dt_sk, tt.transaction_dt_sk) BETWEEN v_yearbegindate AND v_enddate THEN tt.premium_am
+
+                               ELSE 0
+
+                            END) AS ytd_written_prm_am
+
+                       ,SUM(CASE
+
+                               WHEN GREATEST(tt.effective_dt_sk, tt.transaction_dt_sk) BETWEEN v_yearbegindate AND v_enddate THEN tt.premium_original_am
+
+                               ELSE 0
+
+                            END) AS ytd_written_prm_original_am
+
+                       ,SUM(CASE
+
+                               WHEN GREATEST(tt.effective_dt_sk, tt.transaction_dt_sk) BETWEEN v_yearbegindate AND v_enddate THEN tt.commission_am
+
+                               ELSE 0
+
+                            END) AS ytd_commission_am
+
+                       ,SUM(CASE
+
+                               WHEN GREATEST(tt.effective_dt_sk, tt.transaction_dt_sk) BETWEEN v_yearbegindate AND v_enddate THEN tt.commission_original_am
+
+                               ELSE 0
+
+                            END) AS ytd_commission_original_am
+
+                       ,SUM(CASE
+
+                               WHEN GREATEST(tt.effective_dt_sk, tt.transaction_dt_sk) BETWEEN v_yearbegindate AND v_enddate THEN   tt.premium_am
+
+                                                                                                                                  - NVL
+
+                                                                                                                                       (tt.tax_fee_srchrg_am
+
+                                                                                                                                       ,0)
+
+                               ELSE 0
+
+                            END) AS ytd_net_premium_am
+
+                       ,SUM(CASE
+
+                               WHEN GREATEST(tt.effective_dt_sk, tt.transaction_dt_sk) BETWEEN v_yearbegindate AND v_enddate THEN   tt.premium_original_am
+
+                                                                                                                                  - NVL
+
+                                                                                                                                       (tt.tax_fee_srchrg_original_am
+
+                                                                                                                                       ,0)
+
+                               ELSE 0
+
+                            END) AS ytd_net_premium_original_am
+
+                       ,SUM(CASE
+
+                               WHEN tt.expiration_dt_sk > v_monthbegindate THEN tt.premium_am
+
+                               ELSE 0
+
+                            END) AS itd_written_prm_am
+
+                       ,SUM(CASE
+
+                               WHEN tt.expiration_dt_sk > v_monthbegindate THEN tt.premium_original_am
+
+                               ELSE 0
+
+                            END) AS itd_written_prm_original_am
+
+                       ,SUM(CASE
+
+                               WHEN tt.expiration_dt_sk > v_monthbegindate THEN tt.annual_premium_am
+
+                               ELSE 0
+
+                            END) AS annual_premium_am
+
+                       ,SUM(CASE
+
+                               WHEN tt.expiration_dt_sk > v_monthbegindate THEN tt.annual_premium_original_am
+
+                               ELSE 0
+
+                            END) AS annual_premium_original_am
+
+                       ,   SUM(   --for all transactions issued in the month and eff in the month or future
+
+                               DECODE(tt.expiration_dt_sk
+
+                                     ,tt.effective_dt_sk, 0
+
+                                     ,CASE
+
+                                         WHEN tt.expiration_dt_sk > v_monthbegindate THEN(  (  (CASE
+
+                                                                                                   WHEN tt.expiration_dt_sk > v_enddate THEN   v_enddate
+
+                                                                                                                                             + 1
+
+                                                                                                   ELSE tt.expiration_dt_sk
+
+                                                                                                END)
+
+                                                                                             - (CASE
+
+                                                                                                   WHEN tt.effective_dt_sk <= v_monthbegindate THEN v_monthbegindate
+
+                                                                                                   ELSE tt.effective_dt_sk
+
+                                                                                                END))
+
+                                                                                          * NVL(tt.premium_am, 0)
+
+                                                                                          / (tt.expiration_dt_sk - tt.effective_dt_sk))
+
+                                         ELSE 0
+
+                                      END))
+
+                         + SUM(   --for all transactions issued in the month and eff in the past
+
+                               CASE
+
+                                  WHEN tt.transaction_dt_sk BETWEEN v_monthbegindate AND v_enddate
+
+                               AND    tt.effective_dt_sk < v_monthbegindate THEN(CASE
+
+                                                                                    WHEN tt.expiration_dt_sk = tt.effective_dt_sk THEN 0
+
+                                                                                    ELSE(  (  (CASE
+
+                                                                                                  WHEN v_monthbegindate > tt.expiration_dt_sk THEN tt.expiration_dt_sk
+
+                                                                                                  ELSE v_monthbegindate
+
+                                                                                               END)
+
+                                                                                            - tt.effective_dt_sk)
+
+                                                                                         * NVL(tt.premium_am, 0)
+
+                                                                                         / (tt.expiration_dt_sk - tt.effective_dt_sk))
+
+                                                                                 END)
+
+                                  ELSE 0
+
+                               END) AS earned_prm_am
+
+                       ,   SUM(   --for all transactions issued in the month and eff in the month or future
+
+                               DECODE(tt.expiration_dt_sk
+
+                                     ,tt.effective_dt_sk, 0
+
+                                     ,CASE
+
+                                         WHEN tt.expiration_dt_sk > v_monthbegindate THEN(  (  (CASE
+
+                                                                                                   WHEN tt.expiration_dt_sk > v_enddate THEN   v_enddate
+
+                                                                                                                                             + 1
+
+                                                                                                   ELSE tt.expiration_dt_sk
+
+                                                                                                END)
+
+                                                                                             - (CASE
+
+                                                                                                   WHEN tt.effective_dt_sk <= v_monthbegindate THEN v_monthbegindate
+
+                                                                                                   ELSE tt.effective_dt_sk
+
+                                                                                                END))
+
+                                                                                          * NVL(tt.premium_original_am, 0)
+
+                                                                                          / (tt.expiration_dt_sk - tt.effective_dt_sk))
+
+                                         ELSE 0
+
+                                      END))
+
+                         + SUM(   --for all transactions issued in the month and eff in the past
+
+                               CASE
+
+                                  WHEN tt.transaction_dt_sk BETWEEN v_monthbegindate AND v_enddate
+
+                               AND    tt.effective_dt_sk < v_monthbegindate THEN(CASE
+
+                                                                                    WHEN tt.expiration_dt_sk = tt.effective_dt_sk THEN 0
+
+                                                                                    ELSE(  (  (CASE
+
+                                                                                                  WHEN v_monthbegindate > tt.expiration_dt_sk THEN tt.expiration_dt_sk
+
+                                                                                                  ELSE v_monthbegindate
+
+                                                                                               END)
+
+                                                                                            - tt.effective_dt_sk)
+
+                                                                                         * NVL(tt.premium_original_am, 0)
+
+                                                                                         / (tt.expiration_dt_sk - tt.effective_dt_sk))
+
+                                                                                 END)
+
+                                  ELSE 0
+
+                               END) AS earned_prm_original_am
+
+--                       ,MAX(tt.coverage_sk)KEEP (DENSE_RANK FIRST ORDER BY transaction_sqn_sk DESC) coverage_sk
+
+                       ,(case when tt.source_system_sk in (20,21) then
+
+                         min(tt.coverage_sk) KEEP (DENSE_RANK FIRST ORDER BY transaction_sqn_sk)
+
+                         else max(tt.coverage_sk) KEEP (DENSE_RANK FIRST ORDER BY transaction_sqn_sk desc)  end) coverage_sk --->> Harikrishna added for handling negations of transaction_sqn_sk for instanda data
+
+                       ,MAX(tt.customer_sk)KEEP (DENSE_RANK FIRST ORDER BY transaction_sqn_sk DESC) customer_sk
+
+                       ,MAX(tt.policy_type_sk)KEEP (DENSE_RANK FIRST ORDER BY transaction_sqn_sk DESC) policy_type_sk
+
+                       ,MAX(tt.policy_sub_type_sk)KEEP (DENSE_RANK FIRST ORDER BY transaction_sqn_sk DESC) policy_sub_type_sk
+
+                       ,MAX(tt.broker_sk)KEEP (DENSE_RANK FIRST ORDER BY transaction_sqn_sk DESC) broker_sk
+
+                       ,MAX(tt.source_system_sk)KEEP (DENSE_RANK FIRST ORDER BY transaction_sqn_sk DESC) source_system_sk
+
+               FROM     ttransaction tt
+
+                       ,tpolicy pol
+
+               WHERE    pol.policy_sk = tt.policy_sk
+
+               AND      GREATEST(tt.effective_dt_sk, tt.transaction_dt_sk) <= v_enddate
+
+               AND      (   tt.expiration_dt_sk > v_monthbegindate
+
+                         OR GREATEST(tt.effective_dt_sk, tt.transaction_dt_sk) BETWEEN v_yearbegindate AND v_enddate)
+
+               AND      (   policy_type_sk IN(10, 17)
+
+                         OR (    tt.source_system_sk = 14
+
+                             AND policy_type_sk = 7
+
+                             AND policy_sub_type_sk = 1)
+
+                         OR (tt.source_system_sk = 17 AND policy_type_sk = 16 AND policy_sub_type_sk = 3))
+
+               GROUP BY tt.policy_sk
+
+                       ,tt.intcov_sk
+
+                       ,tt.source_system_sk)
+
+         SELECT v_month_sk
+
+               ,prm1.policy_sk
+
+               ,0 AS item_sk
+
+               ,prm1.intcov_sk
+
+               ,0 AS item_attribute_sk
+
+               ,NVL(inf.coverage_sk, prm1.coverage_sk)
+
+               ,prm1.customer_sk
+
+               ,prm1.policy_type_sk
+
+               ,1 AS policy_status_cd
+
+               ,prm1.broker_sk
+
+               ,prm1.source_system_sk
+
+               ,0 AS snapshot_type_in
+
+               ,NVL(prm1.mtd_written_prm_am, 0)
+
+               ,NVL(prm1.mtd_net_premium_am, 0)
+
+               ,NVL(prm1.ytd_written_prm_am, 0)
+
+               ,NVL(prm1.ytd_net_premium_am, 0)
+
+               ,NVL(prm1.itd_written_prm_am, 0)
+
+               ,(NVL(we_ie.written_exposure, 0) + NVL(del_we_ee.written_exposure, 0) + NVL(rein_we_ee.written_exposure, 0)) AS written_xpsr_am
+
+               ,(  NVL(rein_we_ee.earned_exposure, 0)
+
+                 + NVL(del_we_ee.earned_exposure, 0)
+
+                 + NVL(ee_exp.earned_exposure, 0)
+
+                 + NVL(we_ie.inforce_exposure, 0)) AS earned_xpsr_am
+
+               ,NVL(prm1.earned_prm_am, 0)
+
+               ,NVL(inf.inforce_prm_am, 0)
+
+               ,NVL(inf.inforce_ct, 0)
+
+               ,NVL(prm1.annual_premium_am, 0)
+
+               ,NVL(prm1.tfs_am, 0)
+
+               ,NVL(prm1.mtd_written_prm_original_am, 0)
+
+               ,NVL(prm1.ytd_written_prm_original_am, 0)
+
+               ,NVL(prm1.itd_written_prm_original_am, 0)
+
+               ,NVL(prm1.mtd_net_premium_original_am, 0)
+
+               ,NVL(prm1.ytd_net_premium_original_am, 0)
+
+               ,NVL(prm1.earned_prm_original_am, 0)
+
+               ,NVL(inf.inforce_prm_original_am, 0)
+
+               ,NVL(prm1.annual_premium_original_am, 0)
+
+               ,prm1.policy_sub_type_sk
+
+         FROM   inf
+
+               ,prm1
+
+               ,ee_exp
+
+               ,we_ie
+
+               ,del_we_ee
+
+               ,rein_we_ee
+
+         WHERE  prm1.policy_sk = inf.policy_sk(+)
+
+         AND    prm1.intcov_sk = inf.intcov_sk(+)
+
+         AND    prm1.policy_sk = rein_we_ee.policy_sk(+)
+
+         AND    prm1.intcov_sk = rein_we_ee.intcov_sk(+)
+
+         AND    prm1.policy_sk = ee_exp.policy_sk(+)
+
+         AND    prm1.intcov_sk = ee_exp.intcov_sk(+)
+
+         AND    prm1.policy_sk = we_ie.policy_sk(+)
+
+         AND    prm1.intcov_sk = we_ie.intcov_sk(+)
+
+         AND    prm1.policy_sk = del_we_ee.policy_sk(+)
+
+         AND    prm1.intcov_sk = del_we_ee.intcov_sk(+)
+
+         --AND    prm1.source_system_sk IN(1, 2, 5,14)
+
+         AND    prm1.source_system_sk IN(1, 2, 5,14, 16, 17, 18, 19,20,21) ------->>> Harikrishna Modified to Include 20,21 in the filter condition
+
+         AND    (   (    NVL(prm1.itd_written_prm_am, 0) = 0
+
+                     AND (   NVL(prm1.mtd_written_prm_am, 0) <> 0
+
+                          OR NVL(prm1.earned_prm_am, 0) <> 0
+
+                          OR (NVL(we_ie.written_exposure, 0) + NVL(del_we_ee.written_exposure, 0) + NVL(rein_we_ee.written_exposure, 0)) <> 0
+
+                          OR (  NVL(rein_we_ee.earned_exposure, 0)
+
+                              + NVL(del_we_ee.earned_exposure, 0)
+
+                              + NVL(ee_exp.earned_exposure, 0)
+
+                              + NVL(we_ie.inforce_exposure, 0)) <> 0))
+
+                 or NVL(prm1.ytd_written_prm_am, 0) <> 0
+
+                 OR (    NVL(prm1.itd_written_prm_am, 0) <> 0
+
+                     AND (   NVL(prm1.mtd_written_prm_am, 0) <> 0
+
+                          OR NVL(prm1.earned_prm_am, 0) <> 0
+
+                          OR (NVL(we_ie.written_exposure, 0) + NVL(del_we_ee.written_exposure, 0) + NVL(rein_we_ee.written_exposure, 0)) <> 0
+
+                          OR (  NVL(rein_we_ee.earned_exposure, 0)
+
+                              + NVL(del_we_ee.earned_exposure, 0)
+
+                              + NVL(ee_exp.earned_exposure, 0)
+
+                              + NVL(we_ie.inforce_exposure, 0)) <> 0
+
+                          OR NVL(prm1.mtd_commission_am, 0) <> 0
+
+                          OR NVL(prm1.tfs_am, 0) <> 0
+
+                          OR NVL(inf.inforce_prm_am, 0) <> 0)));
+
+ 
+
+      v_rows_processed           := v_rows_processed + SQL%ROWCOUNT;
+
+      COMMIT;
+
+      pk_error_log.pr_log_end_event(v_error_log_sk, v_rows_processed);
+
+   EXCEPTION
+
+      WHEN OTHERS THEN
+
+         pk_error_log.pr_log_err_event(v_error_log_sk, DBMS_UTILITY.format_error_backtrace, SQLERRM);
+
+         RAISE;
+
+   END;
+
+ 
+
+/*
+
+ 
+
+    WITH INF AS
+
+    (
+
+        SELECT   a.policy_sk, a.intcov_sk, 1 as inforce_ct,
+
+                 SUM(tr.premium_am) INFORCE_PRM_AM,
+
+                 SUM(tr.premium_original_am) INFORCE_PRM_ORIGINAL_AM,
+
+                 (months_between(b.expiration_dt, b.inception_dt)/12) AS inforce_exposure
+
+        FROM     tcoverages_inforce a, ttransaction tr, tpel_coverage b
+
+        WHERE    a.snapshot_type_in = 0
+
+        and      a.policy_type_sk IN (10,17)
+
+        and      tr.premium_am  <> 0
+
+        and      a.month_sk = v_month_sk
+
+        AND      a.policy_sk = tr.policy_sk
+
+        AND      a.intcov_sk = tr.intcov_sk
+
+        and      A.COVERAGE_SK = B.PEL_COVERAGE_SK
+
+        AND      GREATEST (tr.transaction_dt_sk, tr.effective_dt_sk) <= v_enddate
+
+        GROUP BY a.policy_sk, a.intcov_sk, (months_between(b.expiration_dt, b.inception_dt)/12)
+
+    ),
+
+    DEL_WE_EE AS
+
+    (
+
+        SELECT   a.policy_sk, a.intcov_sk,
+
+                 (C.EFFECTIVE_DT-POL.expiration_dt)/(pol.EXPIRATION_DT-pol.INCEPTION_DT) as written_exposure, --CANCELLED WRITTEN EXPOSURE
+
+                 CASE   WHEN     c.EFFECTIVE_DT <= v_PrevMonthDateActual
+
+                        THEN    (c.EFFECTIVE_DT-v_PrevMonthDateActual-1)/(pol.EXPIRATION_DT-pol.INCEPTION_DT)
+
+                        ELSE    0
+
+                 END AS earned_exposure
+
+        FROM     tcoverages_deleted a, tpel_coverage c, TPOLICY POL
+
+        WHERE    a.snapshot_type_in = 0
+
+        and      a.policy_type_sk IN (10,17)
+
+        and      a.month_sk = v_month_sk
+
+        AND      A.COVERAGE_SK = C.PEL_COVERAGE_SK
+
+        and      pol.policy_sk = a.policy_sk
+
+    ),
+
+    WE AS
+
+    (
+
+        SELECT a.policy_sk, a.intcov_sk,
+
+               months_between(c.expiration_dt, c.inception_dt)/12 as written_exposure
+
+        from tcoverages_inforce a,
+
+             (select policy_sk, intcov_sk from tcoverages_inforce
+
+              where month_sk = v_month_sk and policy_type_sk IN (10,17) AND SNAPSHOT_TYPE_IN = 0
+
+              minus
+
+              select policy_sk, intcov_sk from tcoverages_inforce
+
+              where month_sk = v_PrevMonth and policy_type_sk IN (10,17) AND SNAPSHOT_TYPE_IN = 0
+
+             ) b,
+
+             tpel_coverage c
+
+        where   a.SNAPSHOT_TYPE_IN = 0
+
+        and     a.policy_type_sk IN (10,17)
+
+        and     a.month_sk = v_month_sk
+
+        and     a.POLICY_SK = b.policy_sk and a.intcov_sk = b.intcov_sk
+
+        AND     a.coverage_SK = c.pel_coverage_sk
+
+        and     a.policy_sk not in (select policy_sk from tcoverages_reinstated
+
+                                      where month_sk = v_month_sk and policy_type_sk IN (10,17) and snapshot_type_in = 0)
+
+ 
+
+    ),
+
+    REIN_WE_EE AS
+
+    (
+
+        SELECT   a.policy_sk, a.intcov_sk,
+
+                 -1 * ((C.EFFECTIVE_DT-POL.expiration_dt)/(pol.EXPIRATION_DT-pol.INCEPTION_DT)) as written_exposure, --CANCELLED WRITTEN EXPOSURE
+
+                 -1 * CASE  WHEN     c.EFFECTIVE_DT <= to_date('31-dec-2005')
+
+                            THEN    (c.EFFECTIVE_DT-to_date('31-dec-2005')-1)/(pol.EXPIRATION_DT-pol.INCEPTION_DT)
+
+                            ELSE    0
+
+                      END AS earned_exposure
+
+        FROM     tcoverages_reinstated a, tpel_coverage c, tpolicy pol
+
+        where    a.snapshot_type_in = 0
+
+        and      a.policy_type_sk IN (10,17)
+
+        and      a.month_sk = v_month_sk
+
+        AND      A.COVERAGE_SK = C.PEL_COVERAGE_SK
+
+        and      pol.policy_sk = a.policy_sk
+
+    ),
+
+ 
+
+*/
+
+   PROCEDURE pel_titems_inf_cal_mn(
+
+      in_date                             DATE) AS
+
+      v_month_sk                    NUMBER;
+
+      v_day_ct                      NUMBER;
+
+      v_enddateactual               DATE;
+
+      v_ym                          NUMBER;
+
+      v_module_name                 terror_log.module_nm%TYPE := $$plsql_unit || '.PEL_TITEMS_INF_CAL_MN';
+
+      v_error_log_sk                terror_log.error_log_sk%TYPE;
+
+      v_log_params                  terror_log.module_params_tx%TYPE := NULL;
+
+      v_rows_processed              terror_log.rows_processed%TYPE := 0;
+
+   BEGIN
+
+      v_enddateactual            := in_date;
+
+ 
+
+      IF v_enddateactual = TRUNC(SYSDATE) THEN
+
+         v_enddateactual            := TRUNC(SYSDATE) - 1;
+
+      END IF;
+
+ 
+
+      v_log_params               := '(End Date ==>' || v_enddateactual || ');';
+
+      v_rows_processed           := 0;
+
+      pk_error_log.pr_log_strt_event(v_module_name, v_log_params, v_error_log_sk);
+
+ 
+
+      -- Get V_YM for sysdate
+
+      SELECT year_month_ct
+
+            ,day_ct
+
+      INTO   v_ym
+
+            ,v_day_ct
+
+      FROM   tdate
+
+      WHERE  actual_dt = v_enddateactual;
+
+ 
+
+      -- Get date_sk for the last date of the sysdate month. This will be used as month_sk in the inforce table.
+
+      SELECT date_sk
+
+      INTO   v_month_sk
+
+      FROM   tdate
+
+      WHERE  year_month_ct = v_ym
+
+      AND    month_end_in = 'Y';
+
+ 
+
+      -- If the sysdate is the first of the month then you dont have to delete any data
+
+      -- If if is not the first of the month then delete all of yesterday's data which is loaded using the same month_sk
+
+      IF v_day_ct <> 1 THEN
+
+         DELETE FROM titems_inforce
+
+               WHERE (policy_type_sk IN(10, 17)
+
+               OR (    source_system_sk = 14
+
+                       AND policy_type_sk = 7
+
+                       AND policy_sub_type_sk = 1)
+
+               OR (source_system_sk = 17 AND policy_type_sk = 16 AND policy_sub_type_sk = 3))
+
+         AND         month_sk = v_month_sk
+
+         AND         snapshot_type_in = 0;
+
+ 
+
+         COMMIT;
+
+      END IF;
+
+ 
+
+      INSERT INTO titems_inforce
+
+                  (month_sk
+
+                  ,item_sk
+
+                  ,coverage_sk
+
+                  ,item_attr_sk
+
+                  ,policy_sk
+
+                  ,policy_type_sk
+
+                  ,customer_sk
+
+                  ,broker_sk
+
+                  ,source_system_sk
+
+                  ,snapshot_type_in
+
+                  ,policy_sub_type_sk)
+
+         SELECT   month_sk
+
+                 ,item_sk
+
+                 ,coverage_sk
+
+                 ,item_attr_sk
+
+                 ,policy_sk
+
+                 ,policy_type_sk
+
+                 ,customer_sk
+
+                 ,MAX(broker_sk)
+
+                 ,source_system_sk
+
+                 ,snapshot_type_in
+
+                 ,policy_sub_type_sk
+
+         FROM     tcoverages_inforce
+
+         WHERE    month_sk = v_month_sk
+
+         AND      (   policy_type_sk IN(10, 17)
+
+                   OR (    source_system_sk = 14
+
+                       AND policy_type_sk = 7
+
+                       AND policy_sub_type_sk = 1)
+
+                   OR (source_system_sk = 17 AND policy_type_sk = 16 AND policy_sub_type_sk = 3))
+
+         --AND      source_system_sk IN(1, 2, 5, 14)
+
+         AND      source_system_sk IN(1, 2, 5, 14, 16, 17, 18, 19, 20, 21) ------>>> Harikrishna Modified to Include 20,21 in the filter condition
+
+         AND      snapshot_type_in = 0
+
+--          AND POLICY_SK<>'-600164861'
+
+         GROUP BY month_sk
+
+                 ,item_sk
+
+                 ,coverage_sk
+
+                 ,item_attr_sk
+
+                 ,policy_sk
+
+                 ,policy_type_sk
+
+                 ,customer_sk
+
+                 ,source_system_sk
+
+                 ,snapshot_type_in
+
+                 ,policy_sub_type_sk;
+
+ 
+
+      v_rows_processed           := v_rows_processed + SQL%ROWCOUNT;
+
+      COMMIT;
+
+      pk_error_log.pr_log_end_event(v_error_log_sk, v_rows_processed);
+
+   EXCEPTION
+
+      WHEN OTHERS THEN
+
+         pk_error_log.pr_log_err_event(v_error_log_sk, DBMS_UTILITY.format_error_backtrace, SQLERRM);
+
+         RAISE;
+
+   END;   ------------------------------------END OF TCOVERAGES_INFORCE_PEL ------------------------------------------------
+
+ 
+
+   PROCEDURE pel_update_driver_info (in_start_date DATE, in_end_date DATE)
+
+   AS
+
+      v_module_name      terror_log.module_nm%TYPE
+
+                            := $$plsql_unit || '.PEL_UPDATE_DRIVER_INFO';
+
+      v_error_log_sk     terror_log.error_log_sk%TYPE;
+
+      v_log_params       terror_log.module_params_tx%TYPE := NULL;
+
+      v_rows_processed   terror_log.rows_processed%TYPE := 0;
+
+   BEGIN
+
+      v_log_params :=
+
+            '(Begin Date ==>'
+
+         || in_start_date
+
+         || ', End Date ==>'
+
+         || in_end_date
+
+         || ');';
+
+ 
+
+      v_rows_processed := 0;
+
+ 
+
+      pk_error_log.pr_log_strt_event (v_module_name,
+
+                                      v_log_params,
+
+                                      v_error_log_sk);
+
+ 
+
+      MERGE INTO tpel_coverage pc
+
+           USING (SELECT *
+
+                    FROM (SELECT *
+
+                            FROM (SELECT policy_no,
+
+                                         inception_dt,
+
+                                         infraction_type_tx,
+
+                                         endorsement_no,
+
+                                         MAX (
+
+                                            endorsement_no)
+
+                                         OVER (
+
+                                            PARTITION BY policy_no,
+
+                                                         inception_dt,
+
+                                                         infraction_type_tx)
+
+                                            en_no
+
+                                    FROM tpel_driver_infraction)
+
+                           WHERE endorsement_no = en_no) PIVOT (COUNT (*)
+
+                                                         FOR infraction_type_tx
+
+                                                         IN  ('Accident' AS acc,
+
+                                                             'Conviction' AS con)))
+
+                 ac
+
+              ON (    pc.policy_no = ac.policy_no
+
+                  AND pc.inception_dt = ac.inception_dt
+
+                  AND pc.endorsement_no = ac.endorsement_no)
+
+      WHEN MATCHED
+
+      THEN
+
+         UPDATE SET
+
+            pc.total_accidents_no = ac.acc, pc.total_convictions_no = ac.con
+
+                 WHERE transaction_dt BETWEEN TRUNC (in_start_date)
+
+                                          AND TRUNC (in_end_date);
+
+ 
+
+      v_rows_processed := v_rows_processed + SQL%ROWCOUNT;
+
+ 
+
+      COMMIT;
+
+ 
+
+      pk_error_log.pr_log_end_event (v_error_log_sk, v_rows_processed);
+
+   EXCEPTION
+
+      WHEN OTHERS
+
+      THEN
+
+         pk_error_log.pr_log_err_event (v_error_log_sk,
+
+                                        DBMS_UTILITY.format_error_backtrace,
+
+                                        SQLERRM);
+
+         RAISE;
+
+   END;
+
+ 
+
+   PROCEDURE pel_qte_update_driver_info (in_start_date    DATE,
+
+                                         in_end_date      DATE)
+
+   AS
+
+      v_module_name      terror_log.module_nm%TYPE
+
+                            := $$plsql_unit || '.PEL_QTE_UPDATE_DRIVER_INFO';
+
+      v_error_log_sk     terror_log.error_log_sk%TYPE;
+
+      v_log_params       terror_log.module_params_tx%TYPE := NULL;
+
+      v_rows_processed   terror_log.rows_processed%TYPE := 0;
+
+   BEGIN
+
+      v_log_params :=
+
+            '(Begin Date ==>'
+
+         || in_start_date
+
+         || ', End Date ==>'
+
+         || in_end_date
+
+         || ');';
+
+ 
+
+      v_rows_processed := 0;
+
+ 
+
+      pk_error_log.pr_log_strt_event (v_module_name,
+
+                                      v_log_params,
+
+                                      v_error_log_sk);
+
+ 
+
+      MERGE INTO tquote_pel_coverage pc
+
+           USING (SELECT *
+
+                    FROM (SELECT *
+
+                            FROM (SELECT quote_no,
+
+                                         inception_dt,
+
+                                         infraction_type_tx,
+
+                                         endorsement_no,
+
+                                         MAX (
+
+                                            endorsement_no)
+
+                                         OVER (
+
+                                            PARTITION BY quote_no,
+
+                                                         inception_dt,
+
+                                                         infraction_type_tx)
+
+                                            en_no
+
+                                    FROM tquote_pel_driver_infraction)
+
+                           WHERE endorsement_no = en_no) PIVOT (COUNT (*)
+
+                                                         FOR infraction_type_tx
+
+                                                         IN  ('Accident' AS acc,
+
+                                                             'Conviction' AS con)))
+
+                 ac
+
+              ON (    pc.quote_no = ac.quote_no
+
+                  AND pc.inception_dt = ac.inception_dt
+
+                  AND pc.endorsement_no = ac.endorsement_no)
+
+      WHEN MATCHED
+
+      THEN
+
+         UPDATE SET
+
+            pc.total_accidents_no = ac.acc, pc.total_convictions_no = ac.con
+
+                 WHERE transaction_dt BETWEEN TRUNC (in_start_date)
+
+                                          AND TRUNC (in_end_date);
+
+ 
+
+      v_rows_processed := v_rows_processed + SQL%ROWCOUNT;
+
+ 
+
+      COMMIT;
+
+ 
+
+      pk_error_log.pr_log_end_event (v_error_log_sk, v_rows_processed);
+
+   EXCEPTION
+
+      WHEN OTHERS
+
+      THEN
+
+         pk_error_log.pr_log_err_event (v_error_log_sk,
+
+                                        DBMS_UTILITY.format_error_backtrace,
+
+                                        SQLERRM);
+
+         RAISE;
+
+   END;
+
+ 
+
+END PEL;
+
+IMPORTANT NOTICE:
+The information in this email (and any attachments) is confidential. If you are not the intended recipient, you must not use or disseminate the information. If you have received this email in error, please immediately notify me by "Reply" command and permanently delete the original and any copies or printouts thereof. Although this email and any attachments are believed to be free of any virus or other defect that might affect any computer system into which it is received and opened, it is the responsibility of the recipient to ensure that it is virus free and no responsibility is accepted by American International Group, Inc. or its subsidiaries or affiliates either jointly or severally, for any loss or damage arising in any way from its use.
